@@ -17,7 +17,7 @@ public:
     std::vector<Position> GetReferencedCells() const override;
 
     bool IsEmpty() const;
-    void Set(std::string text, const SheetInterface* sheet);
+    void Set(std::string text, Position pos, SheetInterface* sheet);
     void Clear();
 
     bool IsReferenced() const;
@@ -30,48 +30,57 @@ public:
 private:
     class Impl {
     public:
-        virtual Value GetValue() const = 0;
+        virtual Value GetValue() = 0;
         virtual std::string GetText() const = 0;
         virtual std::vector<Position> GetReferencedCells() const = 0;
 
         virtual ~Impl() = default;
 
+        bool IsReferenced() const;
         std::vector<Position>& GetParents();
         void AddParent(Position pos);
         bool HasParents() const;
         bool HasCach() const;
         void ClearCach();
 
-        void SetSheet(const SheetInterface* sheet);
+        void SetSheet(SheetInterface* sheet);
+
+        const Position GetPos() const;
+        SheetInterface* GetSheet();
+
+        void InvalidateCache();
+        bool TestCyclicDependencies(Position pos) const;
+        void SetParentForRefCells(Position pos);
     protected:
-        const SheetInterface* sheet_ptr_ = nullptr;
+        SheetInterface* sheet_ptr_ = nullptr;
+        Position pos_;
         std::vector<Position> parent_cells_;
         Value cached_value_;
     };
 
     class EmptyImpl : public Impl {
-        Value GetValue() const override;
+        Value GetValue() override;
         std::string GetText() const override;
         std::vector<Position> GetReferencedCells() const override;
     };
 
     class TextImpl : public Impl {
     public:
-        TextImpl(std::string text, std::string value);
+        TextImpl(std::string text);
 
-        Value GetValue() const override;
+        Value GetValue() override;
         std::string GetText() const override;
         std::vector<Position> GetReferencedCells() const override;
 
     private:
-        std::string text_, value_;
+        std::string value_;
     };
 
     class FormulaImpl : public Impl {
     public:
         FormulaImpl(std::unique_ptr<FormulaInterface> formula);
 
-        Value GetValue() const override;
+        Value GetValue() override;
         std::string GetText() const override;
         std::vector<Position> GetReferencedCells() const override;
 

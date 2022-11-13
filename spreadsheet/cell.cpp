@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 #include <optional>
-
+#include <queue>
 
 // Cell
 Cell::Cell()
@@ -20,7 +20,7 @@ Cell& Cell::operator=(Cell&& rhs) noexcept {
 	return *this;
 }
 
-void Cell::Set(std::string text, const SheetInterface* sheet) {
+void Cell::Set(std::string text, Position pos, SheetInterface* sheet) {
 	if (!text.empty()) {
 		const char& c = text.front();
 		if (c == FORMULA_SIGN && text.size() > 1) {
@@ -33,21 +33,22 @@ void Cell::Set(std::string text, const SheetInterface* sheet) {
 			}
 		}
 		else {
-			std::string value;
-			if (c == ESCAPE_SIGN) {
-				value = text.substr(1);
-			}
-			else {
-				value = text;
-			}
-			impl_ = std::make_unique<TextImpl>(text, value);
+			impl_ = std::make_unique<TextImpl>(text);
 		}
 	}
+	else {
+		impl_ = std::make_unique<EmptyImpl>();
+	}
 	impl_->SetSheet(sheet);
+	if (impl_->TestCyclicDependencies(pos)) {
+		throw CircularDependencyException("Circular Dependency!");
+	}
+	impl_->SetParentForRefCells(pos);
+	impl_->InvalidateCache();
 }
 
 void Cell::Clear() {
-	impl_ = std::make_unique<EmptyImpl>();
+	Set("", impl_->GetPos(), impl_->GetSheet());
 }
 
 bool Cell::IsReferenced() const {
@@ -90,6 +91,10 @@ std::vector<Position> Cell::GetReferencedCells() const {
 }
 
 // Common Impl
+bool Cell::Impl::IsReferenced() const {
+	return !GetReferencedCells().empty();
+}
+
 std::vector<Position>& Cell::Impl::GetParents() {
 	return parent_cells_;
 }
@@ -113,12 +118,79 @@ void Cell::Impl::ClearCach() {
 	cached_value_ = Value{};
 }
 
-void Cell::Impl::SetSheet(const SheetInterface* sheet) {
+void Cell::Impl::SetSheet(SheetInterface* sheet) {
 	sheet_ptr_ = sheet;
 }
 
+const Position Cell::Impl::GetPos() const {
+	return pos_;
+}
+SheetInterface* Cell::Impl::GetSheet() {
+	return sheet_ptr_;
+}
+
+
+void Cell::Impl::InvalidateCache() {
+	std::set<Position> visited_cells;
+	std::queue<Position> queue_;
+	for (const auto& parent_pos : parent_cells_) {
+		queue_.push(parent_pos);
+	}
+	while (!queue_.empty()) {
+		const auto& parent_pos = queue_.front();
+		Cell* parent_cell = static_cast<Cell*>(sheet_ptr_->GetCell(parent_pos));
+		if (parent_cell) {
+			if (parent_cell->HasParents()) {
+				for (const auto& parent_pos : parent_cell->GetParents()) {
+					queue_.push(parent_pos);
+				}
+			}
+			parent_cell->ClearCach();
+		}
+		queue_.pop();
+	}
+	ClearCach();
+}
+
+bool Cell::Impl::TestCyclicDependencies(Position pos) const {
+	if (IsReferenced()) {
+		std::queue<Position> queue_;
+		auto cell_childs = GetReferencedCells();
+		for (const auto& cell_pos : cell_childs) {
+			queue_.push(cell_pos);
+		}
+		std::set<Position> visited_cells;
+		while (!queue_.empty()) {
+			const auto& child_pos = queue_.front();
+			if (!visited_cells.count(child_pos)) {
+				if (child_pos == pos) {
+					return true;
+				}
+				const Cell* child_cell = static_cast<const Cell*>(sheet_ptr_->GetCell(child_pos));
+				if (child_cell && child_cell->IsReferenced()) {
+					auto ref_cells = child_cell->GetReferencedCells();
+					for (const auto& ref_pos : ref_cells) {
+						queue_.push(ref_pos);
+					}
+				}
+				visited_cells.insert(child_pos);
+			}
+			queue_.pop();
+		}
+	}
+	return false;
+}
+
+void Cell::Impl::SetParentForRefCells(Position pos) {
+	for (const auto& cell_pos : GetReferencedCells()) {
+		if (Cell* cell = static_cast<Cell*>(sheet_ptr_->GetCell(cell_pos))) {
+			cell->AddParent(pos);
+		}
+	}
+}
+
 // EmptyImpl
-Cell::Value Cell::EmptyImpl::GetValue() const {
+Cell::Value Cell::EmptyImpl::GetValue() {
 	return Value("");
 }
 std::string Cell::EmptyImpl::GetText() const {
@@ -130,17 +202,20 @@ std::vector<Position> Cell::EmptyImpl::GetReferencedCells() const {
 }
 
 // TextImpl
-Cell::TextImpl::TextImpl(std::string text, std::string value)
-	: text_(std::move(text))
-	, value_(std::move(value)) {
+Cell::TextImpl::TextImpl(std::string text)
+	: value_(std::move(text)) {
 }
 
-Cell::Value Cell::TextImpl::GetValue() const {
+Cell::Value Cell::TextImpl::GetValue() {
+	char c = value_.front();
+	if (c == ESCAPE_SIGN) {
+		return value_.substr(1);
+	}
 	return value_;
 }
 
 std::string Cell::TextImpl::GetText() const {
-	return text_;
+	return value_;
 }
 
 std::vector<Position> Cell::TextImpl::GetReferencedCells() const {
@@ -152,23 +227,21 @@ Cell::FormulaImpl::FormulaImpl(std::unique_ptr<FormulaInterface> formula)
 	: formula_(std::move(formula)) {
 }
 
-Cell::Value Cell::FormulaImpl::GetValue() const {
+Cell::Value Cell::FormulaImpl::GetValue() {
 	if (!HasCach()) {
-		auto result = formula_->Evaluate(*sheet_ptr_);
-		if (std::holds_alternative<double>(result)) {
-			return Value(std::get<double>(result));
+		auto value = formula_->Evaluate(*sheet_ptr_);
+		if (std::holds_alternative<double>(value)) {
+			cached_value_ = std::get<double>(value);
 		}
 		else {
-			return Value(std::get<FormulaError>(result));
+			cached_value_ = std::get<FormulaError>(value);
 		}
 	}
 	return cached_value_;
 }
 
 std::string Cell::FormulaImpl::GetText() const {
-	std::string result = formula_->GetExpression();
-	result.insert(result.begin(), '=');
-	return result;
+	return FORMULA_SIGN + formula_->GetExpression();
 }
 
 std::vector<Position> Cell::FormulaImpl::GetReferencedCells() const {

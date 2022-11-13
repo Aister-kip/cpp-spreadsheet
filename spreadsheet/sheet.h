@@ -31,10 +31,5 @@ private:
     bool RowIsEmpty(int row) const;
     bool ColIsEmpty(int col) const;
 
-    const Cell* GetCellLocal(Position pos) const;
-
     void CutSheet();
-    void InvalidateCache(Position pos);
-    bool TestCyclicDependencies(Position pos, const Cell& cell) const;
-    void SetParentForRefCells(Position pos);
 };
